@@ -42,11 +42,10 @@ from olmocr.train.dataloader import FrontMatterParser
 from olmocr.version import VERSION
 from olmocr.work_queue import LocalBackend, WorkQueue
 
-from finance_data.settings import sec_settings
 
-DEFAULT_SERVER = sec_settings.olmocr_server
-DEFAULT_MODEL = sec_settings.olmocr_model
-DEFAULT_WORKSPACE = sec_settings.olmocr_workspace
+DEFAULT_SERVER = "http://127.0.0.1:8000"
+DEFAULT_MODEL = "allenai/olmOCR-2-7B-1025-FP8"
+DEFAULT_WORKSPACE = "pdf_dir"
 LAUNCH_VLLM_ENV_VAR = "OLMOCR_LAUNCH_VLLM_FROM_SCRIPT"
 
 
@@ -140,12 +139,28 @@ class PageResult:
     is_valid: bool
 
 
+async def render_page(
+    local_pdf_path: str,
+    page: int,
+    target_longest_image_dim: int,
+) -> str:
+    """Render a PDF page to base64 PNG, respecting the global render worker limit."""
+    async with pdf_render_max_workers_limit:
+        return await asyncio.to_thread(
+            render_pdf_to_base64png,
+            local_pdf_path,
+            page,
+            target_longest_image_dim=target_longest_image_dim,
+        )
+
+
 async def build_page_query(
     local_pdf_path: str,
     page: int,
     target_longest_image_dim: int,
     image_rotation: int = 0,
     model_name: str = "olmocr",
+    cached_image_base64: str | None = None,
 ) -> dict:
     MAX_TOKENS = 8000
     assert image_rotation in [
@@ -155,14 +170,10 @@ async def build_page_query(
         270,
     ], "Invalid image rotation provided in build_page_query"
 
-    # Allow the page rendering to process in the background, but limit the number of workers otherwise you can overload the system
-    async with pdf_render_max_workers_limit:
-        image_base64 = await asyncio.to_thread(
-            render_pdf_to_base64png,
-            local_pdf_path,
-            page,
-            target_longest_image_dim=target_longest_image_dim,
-        )
+    if cached_image_base64 is not None:
+        image_base64 = cached_image_base64
+    else:
+        image_base64 = await render_page(local_pdf_path, page, target_longest_image_dim)
 
     if image_rotation != 0:
         image_bytes = base64.b64decode(image_base64)
@@ -209,6 +220,7 @@ async def try_single_page(
     page_num: int,
     attempt: int,
     rotation: int,
+    cached_image_base64: str | None = None,
 ) -> PageResult | None:
     """
     Try processing a single page once. Returns PageResult on success, None on failure.
@@ -230,6 +242,7 @@ async def try_single_page(
             config.target_longest_image_dim,
             image_rotation=rotation,
             model_name=config.model,
+            cached_image_base64=cached_image_base64,
         )
         query["temperature"] = temperature
 
@@ -325,6 +338,7 @@ async def try_single_page_with_backoff(
     page_num: int,
     attempt: int,
     rotation: int,
+    cached_image_base64: str | None = None,
 ) -> PageResult | None:
     """
     Wrapper around try_single_page that handles connection errors with exponential backoff.
@@ -334,7 +348,8 @@ async def try_single_page_with_backoff(
     for backoff_count in range(MAX_BACKOFF_ATTEMPTS):
         try:
             return await try_single_page(
-                config, pdf_orig_path, pdf_local_path, page_num, attempt, rotation
+                config, pdf_orig_path, pdf_local_path, page_num, attempt, rotation,
+                cached_image_base64=cached_image_base64,
             )
         except (ConnectionError, OSError, asyncio.TimeoutError) as e:
             sleep_delay = 10 * (2**backoff_count)
@@ -370,6 +385,12 @@ async def process_page(
 
     await tracker.track_work(worker_id, f"{pdf_orig_path}-{page_num}", "started")
 
+    # Render once upfront; all non-rotation retries reuse this image.
+    # Rotation retries must re-render with the corrected angle, so they don't use this cache.
+    cached_image_base64 = await render_page(
+        pdf_local_path, page_num, config.target_longest_image_dim
+    )
+
     # === First attempt ===
     result = await try_single_page_with_backoff(
         config,
@@ -378,6 +399,7 @@ async def process_page(
         page_num,
         attempt=0,
         rotation=cumulative_rotation,
+        cached_image_base64=cached_image_base64,
     )
 
     if result is not None and not result.response.is_rotation_valid:
@@ -390,6 +412,7 @@ async def process_page(
         return result
 
     # === Rotation error path: sequential retries with model feedback ===
+    # Each attempt uses a freshly rotated image — no cache reuse here.
     if result is not None and not result.response.is_rotation_valid:
         logger.info(
             f"Rotation error for {pdf_orig_path}-{page_num}, retrying sequentially with rotation={cumulative_rotation}"
@@ -442,6 +465,7 @@ async def process_page(
         return make_fallback_result(pdf_orig_path, pdf_local_path, page_num)
 
     # === Non-rotation error path: sequential, but switch to parallel if queue empties ===
+    # Reuse the cached image — the page hasn't changed, only the temperature varies.
     for i, attempt in enumerate(retry_attempts):
         result = await try_single_page_with_backoff(
             config,
@@ -450,6 +474,7 @@ async def process_page(
             page_num,
             attempt,
             rotation=cumulative_rotation,
+            cached_image_base64=cached_image_base64,
         )
 
         if result is not None and result.is_valid and result.response.is_rotation_valid:
@@ -476,6 +501,7 @@ async def process_page(
                         page_num,
                         a,
                         rotation=cumulative_rotation,
+                        cached_image_base64=cached_image_base64,
                     )
                 )
                 for a in remaining_attempts
@@ -520,7 +546,7 @@ async def process_page(
 # Connection pool keyed by (host, port, use_ssl).
 # Pure asyncio Queues — no locks needed since asyncio is single-threaded cooperative.
 # Avoids the sessionpool lock-deadlock issues seen in httpx/httpcore at high request counts.
-_POOL_MAX_IDLE = 32
+_POOL_MAX_IDLE = 256
 _connection_pool: dict[tuple, asyncio.Queue] = {}
 
 
@@ -1334,28 +1360,32 @@ async def run_olmo_ocr(
             sampled_pdfs = random.sample(list(pdf_work_paths), sample_size)
             page_counts = []
 
-            for pdf in tqdm(
-                sampled_pdfs, desc="Sampling PDFs to calculate optimal length"
-            ):
-                try:
-                    with open(pdf, "rb") as f:
-                        data = f.read()
-                    with tempfile.NamedTemporaryFile(
-                        suffix=".pdf", delete=False
-                    ) as tmp_file:
-                        tmp_file.write(data)
-                        tmp_file.flush()
-                        tmp_path = tmp_file.name
+            async def _count_pages(pdf: str) -> int | None:
+                def _read() -> int | None:
                     try:
-                        if is_png(tmp_path) or is_jpeg(tmp_path):
-                            page_counts.append(1)
-                        else:
-                            reader = PdfReader(tmp_path)
-                            page_counts.append(len(reader.pages))
-                    finally:
-                        os.unlink(tmp_path)
-                except Exception as e:
-                    logger.warning(f"Failed to read {pdf}: {e}")
+                        with open(pdf, "rb") as f:
+                            data = f.read()
+                        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
+                            tmp_file.write(data)
+                            tmp_file.flush()
+                            tmp_path = tmp_file.name
+                        try:
+                            if is_png(tmp_path) or is_jpeg(tmp_path):
+                                return 1
+                            else:
+                                return len(PdfReader(tmp_path).pages)
+                        finally:
+                            os.unlink(tmp_path)
+                    except Exception as e:
+                        logger.warning(f"Failed to read {pdf}: {e}")
+                        return None
+
+                return await asyncio.to_thread(_read)
+
+            counts = await asyncio.gather(*[_count_pages(pdf) for pdf in sampled_pdfs])
+            for c in counts:
+                if c is not None:
+                    page_counts.append(c)
 
             if page_counts:
                 avg_pages_per_pdf = sum(page_counts) / len(page_counts)
@@ -1514,14 +1544,13 @@ if __name__ == "__main__":
     import argparse
     import asyncio
 
-    from finance_data.filings.sec_data import sec_data_case_dir
-
+    sec_data_case_dir = "pdfs"
     parser = argparse.ArgumentParser(description="Run OLM OCR Pipeline")
 
     parser.add_argument(
         "--pdf-dir",
         type=str,
-        default=sec_data_case_dir("AMZN", "2025").as_posix(),
+        default=sec_data_case_dir,
         help="Directory containing PDFs to OCR",
     )
     args = parser.parse_args()

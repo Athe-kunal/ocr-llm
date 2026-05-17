@@ -12,7 +12,7 @@ dependencies = [
     "torch>=2.6.0",
     "torchvision",
     "transformers>=4.48.0,<5.0.0",
-    "vllm>=0.15.0",
+    "vllm==0.18.1",
     "fire>=0.7.1",
     "olmocr>=0.4.27",
     "pypdf>=6.11.0",
@@ -40,3 +40,8 @@ flash-attn = ["torch"]
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE" }
+
+[dependency-groups]
+dev = [
+    "nvitop>=1.7.0",
+]
