@@ -9,14 +9,16 @@
 #   MODEL    — served model name      (default: allenai/olmOCR-2-7B-1025-FP8)
 #   MAX_CONCURRENT_REQUESTS — total vLLM requests in-flight across all PDFs (default: 64)
 #   METRICS_DIR — output directory for JSON results (default: metrics)
+#   PLOT_OUT    — benchmark comparison PNG path (default: comparison.png)
 
-LABEL       ?= default
+LABEL       ?= rust
 NOTES       ?=
 PDF_DIR     ?= pdfs
 SERVER      ?= http://127.0.0.1:8000
 MODEL       ?= allenai/olmOCR-2-7B-1025-FP8
-MAX_CONCURRENT_REQUESTS ?= 64
+MAX_CONCURRENT_REQUESTS ?= 128
 METRICS_DIR             ?= metrics
+PLOT_OUT                ?= comparison.png
 
 # vLLM serve settings
 GPU_MEMORY_UTILIZATION ?= 0.90
@@ -29,6 +31,10 @@ DATA_PARALLEL_SIZE     ?= 1
 _SERVER_STRIPPED = $(shell echo "$(SERVER)" | sed 's|https\?://||' | sed 's|/$$||')
 _VLLM_HOST       = $(shell echo "$(_SERVER_STRIPPED)" | cut -d: -f1)
 _VLLM_PORT       = $(shell echo "$(_SERVER_STRIPPED)" | grep -o ':[0-9]*$$' | tr -d ':')
+
+.PHONY: build-rust
+build-rust:
+	uv run maturin develop --release --manifest-path crates_ocr_render/Cargo.toml
 
 .PHONY: benchmark
 
@@ -46,7 +52,8 @@ benchmark:
 
 plot:
 	uv run python -m ocr_llm.plot \
-		--metrics_dir="$(METRICS_DIR)"
+		--metrics_dir="$(METRICS_DIR)" \
+		--out="$(PLOT_OUT)"
 
 .PHONY: vllm-olmocr-serve
 vllm-olmocr-serve:

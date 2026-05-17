@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
+    "ocr_render_rs",
     "loguru>=0.7.3",
     "pydantic>=2.0",
     "safetensors>=0.7.0",
@@ -29,6 +30,9 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.uv.sources]
+ocr_render_rs = { path = "crates_ocr_render", editable = true }
 
 [tool.uv]
 # Omit `environments` so the lockfile is not Linux-only (avoids "not compatible with lockfile" on macOS/Windows).

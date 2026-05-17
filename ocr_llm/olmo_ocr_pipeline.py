@@ -32,7 +32,27 @@ from olmocr.check import (
     check_poppler_version,
     check_torch_gpu_available,
 )
-from olmocr.data.renderpdf import render_pdf_to_base64png
+from olmocr.data.renderpdf import render_pdf_to_base64png as _py_render_pdf_to_base64png
+
+try:
+    import ocr_render_rs as _ocr_render_rs
+    _HAS_RUST_RENDER = True
+except ImportError:
+    _ocr_render_rs = None
+    _HAS_RUST_RENDER = False
+
+
+def render_pdf_to_base64png(local_pdf_path: str, page_num: int, target_longest_image_dim: int = 2048) -> str:
+    """Render a PDF page to a base64-encoded PNG.
+
+    Uses the Rust extension (ocr_render_rs) when available for faster base64
+    encoding; falls back to the pure-Python/subprocess implementation otherwise.
+    """
+    if _HAS_RUST_RENDER:
+        return _ocr_render_rs.render_pdf_page_to_base64png(
+            local_pdf_path, page_num, target_longest_image_dim
+        )
+    return _py_render_pdf_to_base64png(local_pdf_path, page_num, target_longest_image_dim)
 from olmocr.filter.filter import Language, PdfFilter
 from olmocr.image_utils import convert_image_to_pdf_bytes, is_jpeg, is_png
 from olmocr.metrics import MetricsKeeper, WorkerTracker
@@ -176,23 +196,26 @@ async def build_page_query(
         image_base64 = await render_page(local_pdf_path, page, target_longest_image_dim)
 
     if image_rotation != 0:
-        image_bytes = base64.b64decode(image_base64)
-        with Image.open(BytesIO(image_bytes)) as img:
-            if image_rotation == 90:
-                tranpose = Image.Transpose.ROTATE_90
-            elif image_rotation == 180:
-                tranpose = Image.Transpose.ROTATE_180
-            else:
-                tranpose = Image.Transpose.ROTATE_270
+        if _HAS_RUST_RENDER:
+            image_base64 = await asyncio.to_thread(
+                _ocr_render_rs.rotate_base64_png, image_base64, image_rotation
+            )
+        else:
+            image_bytes = base64.b64decode(image_base64)
+            with Image.open(BytesIO(image_bytes)) as img:
+                if image_rotation == 90:
+                    tranpose = Image.Transpose.ROTATE_90
+                elif image_rotation == 180:
+                    tranpose = Image.Transpose.ROTATE_180
+                else:
+                    tranpose = Image.Transpose.ROTATE_270
 
-            rotated_img = img.transpose(tranpose)
+                rotated_img = img.transpose(tranpose)
 
-            # Save the rotated image to a bytes buffer
-            buffered = BytesIO()
-            rotated_img.save(buffered, format="PNG")
+                buffered = BytesIO()
+                rotated_img.save(buffered, format="PNG")
 
-        # Encode the rotated image back to base64
-        image_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+            image_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
     return {
         "model": model_name,
@@ -352,7 +375,7 @@ async def try_single_page_with_backoff(
                 cached_image_base64=cached_image_base64,
             )
         except (ConnectionError, OSError, asyncio.TimeoutError) as e:
-            sleep_delay = 10 * (2**backoff_count)
+            sleep_delay = 1 * (2**backoff_count)
             logger.warning(
                 f"Connection error on {pdf_orig_path}-{page_num} attempt {attempt}: {type(e).__name__}: {e}. "
                 f"Backoff {backoff_count + 1}/{MAX_BACKOFF_ATTEMPTS}, sleeping {sleep_delay}s"
@@ -828,7 +851,7 @@ async def process_pdf(config: OcrConfig, worker_id: int, pdf_orig_path: str):
 
 def build_dolma_document(pdf_orig_path, page_results):
     # Build the document text and page spans
-    document_text = ""
+    parts = []
     pdf_page_spans = []
     current_char_pos = 0
 
@@ -841,9 +864,11 @@ def build_dolma_document(pdf_orig_path, page_results):
             content = ""
 
         start_pos = current_char_pos
-        document_text += content
-        current_char_pos = len(document_text)
+        parts.append(content)
+        current_char_pos += len(content)
         pdf_page_spans.append([start_pos, current_char_pos, page_result.page_num])
+
+    document_text = "".join(parts)
 
     if not document_text:
         logger.info(f"No document text for {pdf_orig_path}")
@@ -1155,13 +1180,13 @@ async def vllm_server_ready(config: OcrConfig):
     delay_sec = 1
     url = f"{config.server.rstrip('/')}/models"
 
-    for attempt in range(1, max_attempts + 1):
-        try:
-            headers = {}
-            if config.server and config.api_key:
-                headers["Authorization"] = f"Bearer {config.api_key}"
+    headers = {}
+    if config.server and config.api_key:
+        headers["Authorization"] = f"Bearer {config.api_key}"
 
-            async with httpx.AsyncClient() as session:
+    async with httpx.AsyncClient() as session:
+        for attempt in range(1, max_attempts + 1):
+            try:
                 response = await session.get(url, headers=headers)
 
                 if response.status_code == 200:
@@ -1171,12 +1196,12 @@ async def vllm_server_ready(config: OcrConfig):
                     logger.info(
                         f"Attempt {attempt}: Unexpected status code {response.status_code}"
                     )
-        except Exception:
-            logger.warning(
-                f"Attempt {attempt}: Please wait for vllm server to become ready..."
-            )
+            except Exception:
+                logger.warning(
+                    f"Attempt {attempt}: Please wait for vllm server to become ready..."
+                )
 
-        await asyncio.sleep(delay_sec)
+            await asyncio.sleep(delay_sec)
 
     raise Exception("vllm server did not become ready after waiting.")
 
@@ -1363,19 +1388,9 @@ async def run_olmo_ocr(
             async def _count_pages(pdf: str) -> int | None:
                 def _read() -> int | None:
                     try:
-                        with open(pdf, "rb") as f:
-                            data = f.read()
-                        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
-                            tmp_file.write(data)
-                            tmp_file.flush()
-                            tmp_path = tmp_file.name
-                        try:
-                            if is_png(tmp_path) or is_jpeg(tmp_path):
-                                return 1
-                            else:
-                                return len(PdfReader(tmp_path).pages)
-                        finally:
-                            os.unlink(tmp_path)
+                        if is_png(pdf) or is_jpeg(pdf):
+                            return 1
+                        return len(PdfReader(pdf).pages)
                     except Exception as e:
                         logger.warning(f"Failed to read {pdf}: {e}")
                         return None

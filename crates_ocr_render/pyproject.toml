@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "ocr_render_rs"
+version = "0.1.0"
+description = "Rust-backed PDF page rendering and image rotation for the OCR pipeline"
+requires-python = ">=3.11"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "ocr_render_rs"

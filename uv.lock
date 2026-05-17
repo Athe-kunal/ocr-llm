@@ -2414,6 +2414,7 @@ dependencies = [
     { name = "fire" },
     { name = "loguru" },
     { name = "matplotlib" },
+    { name = "ocr-render-rs" },
     { name = "olmocr" },
     { name = "pydantic" },
     { name = "pypdf" },
@@ -2435,6 +2436,7 @@ requires-dist = [
     { name = "fire", specifier = ">=0.7.1" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "matplotlib", specifier = ">=3.10.9" },
+    { name = "ocr-render-rs", editable = "crates_ocr_render" },
     { name = "olmocr", specifier = ">=0.4.27" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pypdf", specifier = ">=6.11.0" },
@@ -2448,6 +2450,11 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [{ name = "nvitop", specifier = ">=1.7.0" }]
+
+[[package]]
+name = "ocr-render-rs"
+version = "0.1.0"
+source = { editable = "crates_ocr_render" }
 
 [[package]]
 name = "olmocr"
