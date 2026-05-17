@@ -1,0 +1,42 @@
+[project]
+name = "ocr-llm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "loguru>=0.7.3",
+    "pydantic>=2.0",
+    "safetensors>=0.7.0",
+    "tqdm>=4.66.0",
+    "torch>=2.6.0",
+    "torchvision",
+    "transformers>=4.48.0,<5.0.0",
+    "vllm>=0.15.0",
+    "fire>=0.7.1",
+    "olmocr>=0.4.27",
+    "pypdf>=6.11.0",
+]
+
+dev = [
+    "black>=26.3.0",
+    "ipykernel>=7.2.0",
+    "pytest>=9.0.2",
+    "streamlit>=1.45.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.uv]
+# Omit `environments` so the lockfile is not Linux-only (avoids "not compatible with lockfile" on macOS/Windows).
+# cached-path (via olmocr) requires rich<14 in some setups; keep modern rich by default.
+override-dependencies = ["rich>=14.1.0"]
+
+
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch"]
+
+[tool.uv.extra-build-variables]
+flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE" }
