@@ -250,7 +250,7 @@ async def try_single_page(
     Does NOT handle retries - caller is responsible for retry logic.
     """
     assert config.server, "server URL must be set"
-    COMPLETION_URL = f"{config.server.rstrip('/')}/chat/completions"
+    COMPLETION_URL = f"{config.server.rstrip('/')}/v1/chat/completions"
     MODEL_MAX_CONTEXT = 16384
 
     temp_idx = min(attempt, len(TEMPERATURE_BY_ATTEMPT) - 1)
@@ -604,9 +604,9 @@ async def apost(url, json_data, api_key=None):
     # Try to reuse a pooled connection; fall back to a new one.
     while not pool.empty():
         reader, writer = pool.get_nowait()
-        if not writer.is_closing():
+        if not writer.is_closing() and not reader.at_eof():
             break
-        # Stale connection — discard and try the next one.
+        # Stale connection — server closed its end or client is closing.
         try:
             writer.close()
         except Exception:
@@ -781,7 +781,12 @@ async def process_single_pdf(
 
         # Process pages with bounded concurrency so one large PDF can't monopolise
         # the shared semaphores and starve other workers.
-        pages_per_pdf_limit = asyncio.Semaphore(16)
+        # Scale the per-PDF cap with the global concurrency budget: each worker
+        # gets an equal share, with a floor of 16 so small deployments still
+        # pipeline renders and requests effectively.
+        pages_per_pdf_limit = asyncio.Semaphore(
+            max(16, config.max_concurrent_requests // max(1, config.workers))
+        )
 
         async def _process_page_bounded(page_num: int) -> PageResult:
             async with pages_per_pdf_limit:
@@ -1178,7 +1183,7 @@ async def vllm_server_ready(config: OcrConfig):
     assert config.server, "server URL must be set"
     max_attempts = config.max_server_ready_timeout
     delay_sec = 1
-    url = f"{config.server.rstrip('/')}/models"
+    url = f"{config.server.rstrip('/')}/v1/models"
 
     headers = {}
     if config.server and config.api_key:
@@ -1269,7 +1274,7 @@ async def run_olmo_ocr(
     ``OLMOCR_LAUNCH_VLLM_FROM_SCRIPT=true`` and omit ``server`` to allow this
     function to start a local vLLM server.
     """
-    pdfs = glob.glob(str(pathlib.Path(pdf_dir) / "*.pdf"))
+    pdfs = glob.glob(str(pathlib.Path(pdf_dir) / "**" / "*.pdf"), recursive=True)
 
     if unknown_args is None:
         unknown_args = []

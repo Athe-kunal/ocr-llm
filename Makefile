@@ -26,11 +26,42 @@ MAX_MODEL_LEN          ?= 16384
 TENSOR_PARALLEL_SIZE   ?= 1
 DATA_PARALLEL_SIZE     ?= 1
 
+# ocr-save-md settings
+WORKSPACE        ?= pdf_dir
+WORKERS          ?= 20
+APPLY_FILTER     ?= False
+GUIDED_DECODING  ?= False
+API_KEY          ?=
+DISK_LOGGING     ?=
+
 # Parse host and port out of SERVER so both benchmark and vllm-olmocr-serve
 # share a single source of truth.
 _SERVER_STRIPPED = $(shell echo "$(SERVER)" | sed 's|https\?://||' | sed 's|/$$||')
 _VLLM_HOST       = $(shell echo "$(_SERVER_STRIPPED)" | cut -d: -f1)
 _VLLM_PORT       = $(shell echo "$(_SERVER_STRIPPED)" | grep -o ':[0-9]*$$' | tr -d ':')
+
+.PHONY: ocr-save-md
+ocr-save-md:
+	uv run python -c "\
+import asyncio; \
+from ocr_llm.olmo_ocr_pipeline import run_olmo_ocr; \
+asyncio.run(run_olmo_ocr( \
+    pdf_dir='$(PDF_DIR)', \
+    workspace='$(WORKSPACE)', \
+    server='$(SERVER)', \
+    model='$(MODEL)', \
+    workers=$(WORKERS), \
+    max_concurrent_requests=$(MAX_CONCURRENT_REQUESTS), \
+    tensor_parallel_size=$(TENSOR_PARALLEL_SIZE), \
+    data_parallel_size=$(DATA_PARALLEL_SIZE), \
+    gpu_memory_utilization=$(GPU_MEMORY_UTILIZATION), \
+    max_model_len=$(MAX_MODEL_LEN), \
+    apply_filter=$(APPLY_FILTER), \
+    guided_decoding=$(GUIDED_DECODING), \
+    markdown=True, \
+    api_key='$(API_KEY)' or None, \
+    disk_logging='$(DISK_LOGGING)' or None, \
+))"
 
 .PHONY: build-rust
 build-rust:
@@ -63,7 +94,17 @@ vllm-olmocr-serve:
 		--tensor-parallel-size $(TENSOR_PARALLEL_SIZE) \
 		--data-parallel-size $(DATA_PARALLEL_SIZE) \
 		--max-num-batched-tokens 65536 \
-		--max-num-seqs 128 \
+		--max-num-seqs 256 \
 		--limit-mm-per-prompt '{"video": 0}' \
 		--host $(_VLLM_HOST) \
 		--port $(_VLLM_PORT)
+
+.PHONY: guidellm-benchmark
+guidellm-benchmark:
+	uv run guidellm benchmark \
+		--target "http://localhost:$(_VLLM_PORT)" \
+		--profile throughput \
+		--max-seconds 300 \
+		--rate 20 \
+		--data "prompt_tokens=1024,output_tokens=4096" \
+		--output-path benchmark.yaml

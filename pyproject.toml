@@ -18,6 +18,7 @@ dependencies = [
     "olmocr>=0.4.27",
     "pypdf>=6.11.0",
     "matplotlib>=3.10.9",
+    "guidellm>=0.6.0",
 ]
 
 dev = [
