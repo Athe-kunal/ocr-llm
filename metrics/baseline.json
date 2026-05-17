@@ -1,0 +1,116 @@
+{
+  "metadata": {
+    "label": "default",
+    "notes": "",
+    "timestamp": "2026-05-17T21:33:29.298787+00:00",
+    "server": "http://127.0.0.1:8000",
+    "model": "allenai/olmOCR-2-7B-1025-FP8",
+    "pdf_dir": "pdfs",
+    "num_pdfs": 5,
+    "num_pages": 225
+  },
+  "throughput": {
+    "output_tokens_per_s": 2170.943,
+    "total_tokens_per_s": 2170.943,
+    "requests_per_s": 2.3614,
+    "request_goodput_per_s": 0.0,
+    "peak_output_tokens_per_s": 4032.0,
+    "max_concurrent_requests": 70,
+    "completed": 225,
+    "failed": 0,
+    "total_input_tokens": 0,
+    "total_output_tokens": 206849
+  },
+  "latency_ms": {
+    "ttft": {
+      "mean": 1560.749,
+      "median": 246.362,
+      "std": 2248.085,
+      "p50": 246.362,
+      "p90": 6108.706,
+      "p95": 6121.68,
+      "p99": 6135.258
+    },
+    "itl": {
+      "mean": 23.386,
+      "median": 17.116,
+      "std": 33.717,
+      "p50": 17.116,
+      "p90": 32.697,
+      "p95": 77.486,
+      "p99": 111.329
+    },
+    "tpot": {
+      "mean": 23.917,
+      "median": 24.679,
+      "std": 4.702,
+      "p50": 24.679,
+      "p90": 27.748,
+      "p95": 27.997,
+      "p99": 33.406
+    },
+    "e2el": {
+      "mean": 22987.527,
+      "median": 20837.268,
+      "std": 14294.959,
+      "p50": 20837.268,
+      "p90": 43102.731,
+      "p95": 48115.445,
+      "p99": 66974.783
+    }
+  },
+  "pdf_metrics": {
+    "mean_render_time_s": 1.2554,
+    "mean_total_time_s": 83.1752,
+    "per_pdf": [
+      {
+        "path": "pdfs/AAPL-2024/10-K.pdf",
+        "pages": 60,
+        "render_time_s": 1.0343,
+        "total_time_s": 87.4744
+      },
+      {
+        "path": "pdfs/AAPL-2024/10-Q1.pdf",
+        "pages": 25,
+        "render_time_s": 0.9734,
+        "total_time_s": 90.3585
+      },
+      {
+        "path": "pdfs/AAPL-2024/10-Q2.pdf",
+        "pages": 25,
+        "render_time_s": 1.169,
+        "total_time_s": 91.9806
+      },
+      {
+        "path": "pdfs/AAPL-2024/8-K.pdf",
+        "pages": 4,
+        "render_time_s": 1.1416,
+        "total_time_s": 50.7879
+      },
+      {
+        "path": "pdfs/AAPL-2024/DEF 14A.pdf",
+        "pages": 111,
+        "render_time_s": 1.9586,
+        "total_time_s": 95.2745
+      }
+    ]
+  },
+  "normalized_page_time_ms_per_token": {
+    "mean": 25.858,
+    "median": 26.69,
+    "p90": 28.453,
+    "p99": 36.045
+  },
+  "vllm_server": {
+    "vllm:num_requests_running": 0.0,
+    "vllm:num_requests_waiting": 0.0,
+    "vllm:prompt_tokens_total": 1205550.0,
+    "vllm:generation_tokens_total": 624707.0,
+    "vllm:time_to_first_token_seconds_count": 675.0,
+    "vllm:time_to_first_token_seconds_sum": 1265.599644,
+    "vllm:inter_token_latency_seconds_count": 624032.0,
+    "vllm:inter_token_latency_seconds_sum": 13253.760235,
+    "vllm:e2e_request_latency_seconds_count": 675.0,
+    "vllm:e2e_request_latency_seconds_sum": 14519.197962
+  }
+}

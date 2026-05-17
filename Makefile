@@ -7,7 +7,7 @@
 #   PDF_DIR  — path to folder of PDFs (default: pdf_dir)
 #   SERVER   — vLLM server URL        (default: http://127.0.0.1:8000)
 #   MODEL    — served model name      (default: allenai/olmOCR-2-7B-1025-FP8)
-#   CONCURRENCY — PDFs processed in parallel (default: 4)
+#   MAX_CONCURRENT_REQUESTS — total vLLM requests in-flight across all PDFs (default: 64)
 #   METRICS_DIR — output directory for JSON results (default: metrics)
 
 LABEL       ?= default
@@ -15,8 +15,8 @@ NOTES       ?=
 PDF_DIR     ?= pdfs
 SERVER      ?= http://127.0.0.1:8000
 MODEL       ?= allenai/olmOCR-2-7B-1025-FP8
-CONCURRENCY ?= 4
-METRICS_DIR ?= metrics
+MAX_CONCURRENT_REQUESTS ?= 64
+METRICS_DIR             ?= metrics
 
 # vLLM serve settings
 GPU_MEMORY_UTILIZATION ?= 0.90
@@ -39,7 +39,13 @@ benchmark:
 		--model="$(MODEL)" \
 		--label="$(LABEL)" \
 		--notes="$(NOTES)" \
-		--concurrency=$(CONCURRENCY) \
+		--max_concurrent_requests=$(MAX_CONCURRENT_REQUESTS) \
+		--metrics_dir="$(METRICS_DIR)"
+
+.PHONY: plot
+
+plot:
+	uv run python -m ocr_llm.plot \
 		--metrics_dir="$(METRICS_DIR)"
 
 .PHONY: vllm-olmocr-serve

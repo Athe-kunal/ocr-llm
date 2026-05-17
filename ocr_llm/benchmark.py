@@ -41,6 +41,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     RequestFuncOutput,
     async_request_openai_chat_completions,
 )
+from vllm.benchmarks.datasets import SampleRequest
 from vllm.benchmarks.serve import BenchmarkMetrics, calculate_metrics
 from vllm.tokenizers import TokenizerLike
 
@@ -49,8 +50,7 @@ DEFAULT_MODEL = "allenai/olmOCR-2-7B-1025-FP8"
 DEFAULT_METRICS_DIR = "metrics"
 DEFAULT_TARGET_IMAGE_DIM = 1288
 DEFAULT_MAX_TOKENS = 8000
-DEFAULT_CONCURRENCY = 4        # number of PDFs processed concurrently
-DEFAULT_PAGES_PER_PDF = 16     # max page requests in-flight per PDF
+DEFAULT_MAX_CONCURRENT_REQUESTS = 64   # total vLLM requests in-flight across all PDFs
 DEFAULT_PERCENTILES = [50.0, 90.0, 95.0, 99.0]
 
 # Prometheus metric names we care about on the vLLM server
@@ -80,8 +80,7 @@ class BenchmarkConfig:
     model: str = DEFAULT_MODEL
     label: str = "default"
     notes: str = ""
-    concurrency: int = DEFAULT_CONCURRENCY
-    pages_per_pdf: int = DEFAULT_PAGES_PER_PDF
+    max_concurrent_requests: int = DEFAULT_MAX_CONCURRENT_REQUESTS
     target_image_dim: int = DEFAULT_TARGET_IMAGE_DIM
     max_tokens: int = DEFAULT_MAX_TOKENS
     percentiles: list[float] = field(default_factory=lambda: list(DEFAULT_PERCENTILES))
@@ -179,8 +178,13 @@ async def benchmark_pdf(
     config: BenchmarkConfig,
     pdf_path: str,
     session: aiohttp.ClientSession,
+    request_semaphore: asyncio.Semaphore,
 ) -> PDFBenchmarkResult:
-    """Process one PDF: render pages, stream through vLLM, collect metrics."""
+    """Process one PDF: render all pages, then stream them through vLLM.
+
+    render_time_s captures the wall time until all pages are ready for vLLM.
+    request_semaphore is shared across all PDFs to cap total in-flight requests.
+    """
     t0 = time.perf_counter()
 
     with tempfile.NamedTemporaryFile("wb+", suffix=".pdf", delete=False) as tf:
@@ -193,39 +197,28 @@ async def benchmark_pdf(
         reader = PdfReader(tmp_path)
         num_pages = reader.get_num_pages()
 
-        # --- Render phase: time until all pages are ready for vLLM ---
-        pages_semaphore = asyncio.Semaphore(config.pages_per_pdf)
-
-        render_times: list[float] = []
-        images: list[str] = []
-
+        # --- Render phase: all pages rendered concurrently (CPU-bound, no vLLM load) ---
         async def _render_one(page_num: int) -> tuple[int, str, float]:
-            async with pages_semaphore:
-                r0 = time.perf_counter()
-                img = await _render_page_to_base64(
-                    tmp_path, page_num, config.target_image_dim
-                )
-                return page_num, img, time.perf_counter() - r0
+            r0 = time.perf_counter()
+            img = await _render_page_to_base64(
+                tmp_path, page_num, config.target_image_dim
+            )
+            return page_num, img, time.perf_counter() - r0
 
         render_tasks = [
             asyncio.create_task(_render_one(p)) for p in range(1, num_pages + 1)
         ]
         render_results = await asyncio.gather(*render_tasks)
+        render_results = sorted(render_results, key=lambda x: x[0])
 
         t_after_render = time.perf_counter()
         render_wall_time = t_after_render - t0
 
-        # Sort by page number so page_data list is ordered
-        render_results = sorted(render_results, key=lambda x: x[0])
-        for _, img, rt in render_results:
-            images.append(img)
-            render_times.append(rt)
-
-        # --- Inference phase: SSE streaming requests ---
+        # --- Inference phase: all pages sent concurrently, throttled by shared semaphore ---
         async def _request_one(
             page_num: int, image_base64: str, render_time: float
         ) -> PageBenchmarkData:
-            async with pages_semaphore:
+            async with request_semaphore:
                 req_input = _build_request_func_input(config, image_base64)
                 output = await async_request_openai_chat_completions(
                     req_input, session
@@ -267,19 +260,37 @@ async def run_benchmark(config: BenchmarkConfig) -> dict:
     if not pdf_files:
         raise ValueError(f"No PDF files found recursively in {config.pdf_dir!r}")
 
-    print(f"\n[benchmark] label={config.label!r}  pdfs={len(pdf_files)}  server={config.server}")
+    total_pdfs = len(pdf_files)
+    print(
+        f"\n[benchmark] label={config.label!r}  pdfs={total_pdfs}"
+        f"  max_concurrent_requests={config.max_concurrent_requests}"
+        f"  server={config.server}"
+    )
 
-    pdf_semaphore = asyncio.Semaphore(config.concurrency)
+    # Single global semaphore caps total vLLM requests in-flight across all PDFs,
+    # mirroring how olmo_ocr_pipeline uses max_concurrent_requests_limit.
+    request_semaphore = asyncio.Semaphore(config.max_concurrent_requests)
     timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
     t_start = time.perf_counter()
-    pdf_results: list[PDFBenchmarkResult] = []
+    completed_count = 0
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async def _run_one(pdf_path: Path) -> PDFBenchmarkResult:
-            async with pdf_semaphore:
-                print(f"  → {pdf_path.name}")
-                return await benchmark_pdf(config, str(pdf_path), session)
+            nonlocal completed_count
+            print(f"  [  0/{total_pdfs}] starting  {pdf_path.name}")
+            result = await benchmark_pdf(config, str(pdf_path), session, request_semaphore)
+            completed_count += 1
+            remaining = total_pdfs - completed_count
+            elapsed = time.perf_counter() - t_start
+            rate = completed_count / elapsed
+            eta = remaining / rate if rate > 0 else 0.0
+            print(
+                f"  [{completed_count:3d}/{total_pdfs}] done      {pdf_path.name}"
+                f"  ({result.num_pages}pp, {result.total_time_s:.1f}s)"
+                f"  remaining={remaining}  eta≈{eta:.0f}s"
+            )
+            return result
 
         tasks = [asyncio.create_task(_run_one(p)) for p in pdf_files]
         pdf_results = await asyncio.gather(*tasks)
@@ -295,11 +306,16 @@ async def run_benchmark(config: BenchmarkConfig) -> dict:
 
     # calculate_metrics() does all the stats math: mean/median/std/percentiles
     # for TTFT, ITL, TPOT, E2EL, plus throughput figures.
-    # input_requests arg is only in the signature but never read — pass empty.
-    # vLLM's calculate_metrics body explicitly handles tokenizer=None, but the
-    # type signature doesn't admit None. cast() satisfies the type checker.
+    # input_requests must be the same length as outputs — it indexes them in
+    # lockstep to read prompt_len. We build lightweight SampleRequests from the
+    # prompt_len already recorded in each RequestFuncOutput.
+    # vLLM's body handles tokenizer=None explicitly; cast() satisfies the type checker.
+    sample_requests = [
+        SampleRequest(prompt="", prompt_len=o.prompt_len, expected_output_len=o.output_tokens or 0)
+        for o in all_outputs
+    ]
     bench_metrics, _ = calculate_metrics(
-        input_requests=[],
+        input_requests=sample_requests,
         outputs=all_outputs,
         dur_s=dur_s,
         tokenizer=cast(TokenizerLike, None),
@@ -565,8 +581,7 @@ def main(
     notes: str = "",
     server: str = DEFAULT_SERVER,
     model: str = DEFAULT_MODEL,
-    concurrency: int = DEFAULT_CONCURRENCY,
-    pages_per_pdf: int = DEFAULT_PAGES_PER_PDF,
+    max_concurrent_requests: int = DEFAULT_MAX_CONCURRENT_REQUESTS,
     target_image_dim: int = DEFAULT_TARGET_IMAGE_DIM,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     metrics_dir: str = DEFAULT_METRICS_DIR,
@@ -575,17 +590,16 @@ def main(
     """Run the OCR benchmark harness.
 
     Args:
-        pdf_dir:         Directory containing *.pdf files to process.
-        label:           Short name for this implementation/run (used in filenames).
-        notes:           Free-text description of this run (hardware, config, etc.).
-        server:          vLLM server base URL.
-        model:           Model name as served by vLLM.
-        concurrency:     Number of PDFs processed concurrently.
-        pages_per_pdf:   Max in-flight page requests per PDF.
-        target_image_dim: Longest image dimension for PDF rendering.
-        max_tokens:      max_completion_tokens sent to the model.
-        metrics_dir:     Directory to write result JSON files.
-        api_key:         Bearer token for authenticated vLLM servers.
+        pdf_dir:                  Directory containing *.pdf files to process.
+        label:                    Short name for this implementation/run (used in filenames).
+        notes:                    Free-text description of this run (hardware, config, etc.).
+        server:                   vLLM server base URL.
+        model:                    Model name as served by vLLM.
+        max_concurrent_requests:  Total vLLM page requests in-flight across all PDFs.
+        target_image_dim:         Longest image dimension for PDF rendering.
+        max_tokens:               max_completion_tokens sent to the model.
+        metrics_dir:              Directory to write result JSON files.
+        api_key:                  Bearer token for authenticated vLLM servers.
     """
     config = BenchmarkConfig(
         pdf_dir=pdf_dir,
@@ -593,8 +607,7 @@ def main(
         model=model,
         label=label,
         notes=notes,
-        concurrency=concurrency,
-        pages_per_pdf=pages_per_pdf,
+        max_concurrent_requests=max_concurrent_requests,
         target_image_dim=target_image_dim,
         max_tokens=max_tokens,
         metrics_dir=metrics_dir,
