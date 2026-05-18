@@ -19,6 +19,8 @@ dependencies = [
     "pypdf>=6.11.0",
     "matplotlib>=3.10.9",
     "guidellm>=0.6.0",
+    "streamlit>=1.57.0",
+    "pymupdf>=1.27.2.3",
 ]
 
 dev = [
