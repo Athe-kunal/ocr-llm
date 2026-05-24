@@ -1,0 +1,15 @@
+.git
+.gitignore
+.mypy_cache
+__pycache__
+*.py[cod]
+*.log
+.venv
+metrics/
+pdf_dir/
+pdfs/
+comparison.png
+benchmark.yaml
+vllm-embd-serve.log
+*.png
+*.json
